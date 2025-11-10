@@ -13,74 +13,130 @@ const FileUpload: React.FC<FileUploadProps> = ({ userId }) => {
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploadedFileId, setUploadedFileId] = useState<string | null>(null);
   const [uploadedRowCount, setUploadedRowCount] = useState<number | null>(null);
+  const [justUploadedFileId, setJustUploadedFileId] = useState<string | null>(null); // Track recently uploaded files
   const queryClient = useQueryClient();
 
-  // Restore uploadedFileId from localStorage on mount, but verify file still exists
-  // This ensures the table persists across page refreshes and tab switches
+  // Restore uploadedFileId from localStorage on mount
+  // IMPORTANT: Restore immediately, verify file exists asynchronously
+  // This prevents the table from disappearing during catalog verification
   useEffect(() => {
-    // Always check localStorage on mount - restore if available and state is empty
-    if (!uploadedFileId) {
-      const storedFileId = localStorage.getItem(`lastUploadedFile_${userId}`);
-      if (storedFileId) {
-        // Verify the file still exists by checking the catalogs
-        queryClient.fetchQuery(['catalogs', userId]).then((catalogs: any) => {
-          const fileExists = catalogs?.some((cat: any) => cat.file_id === storedFileId);
-          if (fileExists) {
-            setUploadedFileId(storedFileId);
-            // Try to get row count from storage if available
-            const storedRowCount = localStorage.getItem(`lastUploadedRowCount_${userId}`);
-            if (storedRowCount) {
-              setUploadedRowCount(parseInt(storedRowCount, 10));
-            }
-          } else {
-            // File was deleted, clear localStorage
-            localStorage.removeItem(`lastUploadedFile_${userId}`);
-            localStorage.removeItem(`lastUploadedRowCount_${userId}`);
-          }
-        }).catch(() => {
-          // If query fails, clear localStorage to be safe
+    // Always check localStorage on mount - restore immediately if available
+    const storedFileId = localStorage.getItem(`lastUploadedFile_${userId}`);
+    if (storedFileId && !uploadedFileId) {
+      console.log('Restoring uploadedFileId from localStorage:', storedFileId);
+      // Restore state immediately (optimistic restoration)
+      setUploadedFileId(storedFileId);
+      const storedRowCount = localStorage.getItem(`lastUploadedRowCount_${userId}`);
+      if (storedRowCount) {
+        setUploadedRowCount(parseInt(storedRowCount, 10));
+      }
+      
+      // Verify file exists asynchronously (don't block table rendering)
+      // If file doesn't exist, it will be cleared by the catalog subscription check
+      queryClient.fetchQuery(['catalogs', userId]).then((catalogs: any) => {
+        const fileExists = catalogs?.some((cat: any) => cat.file_id === storedFileId);
+        if (!fileExists) {
+          console.log('File not found in catalogs after verification, clearing state');
+          // File was deleted, clear state and localStorage
+          setUploadedFileId(null);
+          setUploadedRowCount(null);
           localStorage.removeItem(`lastUploadedFile_${userId}`);
           localStorage.removeItem(`lastUploadedRowCount_${userId}`);
-        });
-      }
+        } else {
+          console.log('File verified in catalogs, table should be visible');
+        }
+      }).catch((error) => {
+        console.error('Error fetching catalogs for verification:', error);
+        // Don't clear state on error - might be a transient network issue
+        // The table will show an error if the file truly doesn't exist
+        console.warn('Catalog verification failed, but keeping table visible (might be transient error)');
+      });
+    } else if (!storedFileId) {
+      console.log('No stored fileId found in localStorage');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]); // Only run on mount and when userId changes
 
   // Save to localStorage when file is successfully uploaded
   // Only save, never clear - this ensures table persists across refreshes and tab switches
+  // Added try-catch for Edge compatibility
   useEffect(() => {
     if (uploadedFileId) {
-      localStorage.setItem(`lastUploadedFile_${userId}`, uploadedFileId);
-      if (uploadedRowCount !== null) {
-        localStorage.setItem(`lastUploadedRowCount_${userId}`, uploadedRowCount.toString());
+      try {
+        localStorage.setItem(`lastUploadedFile_${userId}`, uploadedFileId);
+        if (uploadedRowCount !== null) {
+          localStorage.setItem(`lastUploadedRowCount_${userId}`, uploadedRowCount.toString());
+        }
+        console.log('Saved uploadedFileId to localStorage in useEffect:', uploadedFileId);
+      } catch (e) {
+        console.error('Error saving to localStorage in useEffect:', e);
       }
     }
     // Note: We don't clear localStorage here - we want the table to persist even after refresh
   }, [uploadedFileId, uploadedRowCount, userId]);
 
   // Subscribe to catalog changes to detect when current file is deleted
-  useQuery(
+  // IMPORTANT: Always enable when userId exists (not just when uploadedFileId exists)
+  // This ensures catalog refetches after upload to include the new file
+  const { data: catalogsForCheck } = useQuery(
     ['catalogs', userId],
     () => getCatalogs(userId),
     {
-      enabled: !!userId && !!uploadedFileId,
+      enabled: !!userId, // Always enable when userId exists (Edge compatibility)
       refetchInterval: false,
-      onSuccess: (catalogs) => {
-        // Check if current uploadedFileId still exists
-        if (uploadedFileId && catalogs) {
-          const fileExists = catalogs.some((cat) => cat.file_id === uploadedFileId);
-          if (!fileExists) {
-            // File was deleted, clear state and localStorage
-            setUploadedFileId(null);
-            setUploadedRowCount(null);
-            localStorage.removeItem(`lastUploadedFile_${userId}`);
-            localStorage.removeItem(`lastUploadedRowCount_${userId}`);
-          }
-        }
-      }
+      // Refetch when catalogs are invalidated (after upload)
+      staleTime: 0, // Consider data stale immediately to allow refetch after upload
     }
   );
+
+  // Only clear state if catalogs are loaded AND file doesn't exist
+  // IMPORTANT: Don't clear state if file was just uploaded (race condition fix for Edge)
+  useEffect(() => {
+    if (uploadedFileId && catalogsForCheck && catalogsForCheck.length > 0) {
+      // Don't check if this file was just uploaded (wait for catalog to update)
+      if (justUploadedFileId === uploadedFileId) {
+        console.log('File was just uploaded, skipping catalog check (waiting for catalog update)');
+        return;
+      }
+      
+      const fileExists = catalogsForCheck.some((cat) => cat.file_id === uploadedFileId);
+      if (!fileExists) {
+        console.log('File no longer exists in catalogs, clearing state');
+        // File was deleted, clear state and localStorage
+        setUploadedFileId(null);
+        setUploadedRowCount(null);
+        localStorage.removeItem(`lastUploadedFile_${userId}`);
+        localStorage.removeItem(`lastUploadedRowCount_${userId}`);
+      }
+    }
+    // Only run this check after catalogs are loaded, not during loading
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catalogsForCheck, uploadedFileId, userId, justUploadedFileId]); // Only when catalogs or uploadedFileId changes
+
+  // Clear justUploadedFileId flag after catalog includes the file (Edge compatibility)
+  // This ensures we don't clear state before the backend adds the file to the catalog
+  useEffect(() => {
+    if (!justUploadedFileId) return;
+
+    // Check if file exists in catalog
+    if (catalogsForCheck) {
+      const fileExistsInCatalog = catalogsForCheck.some((cat) => cat.file_id === justUploadedFileId);
+      if (fileExistsInCatalog) {
+        console.log('File found in catalog, clearing justUploadedFileId flag');
+        setJustUploadedFileId(null);
+        return;
+      }
+    }
+
+    // File not in catalog yet, set a timer to clear flag after delay (safety fallback)
+    // This prevents the flag from staying set forever if catalog never updates
+    const timer = setTimeout(() => {
+      console.log('Clearing justUploadedFileId flag after timeout (catalog may have updated)');
+      setJustUploadedFileId(null);
+    }, 5000); // Wait 5 seconds max for catalog to update
+
+    return () => clearTimeout(timer);
+  }, [justUploadedFileId, catalogsForCheck]);
 
   const onDrop = useCallback(
     async (acceptedFiles: File[]) => {
@@ -103,13 +159,38 @@ const FileUpload: React.FC<FileUploadProps> = ({ userId }) => {
         // Update state after all files are processed
         // This will automatically save to localStorage and update the table
         if (lastFileId) {
-          setUploadedFileId(lastFileId);
-          setUploadedRowCount(lastRowCount);
+          console.log('File uploaded successfully, setting uploadedFileId:', lastFileId);
+          // Set flag to prevent catalog check from clearing state immediately (Edge fix)
+          setJustUploadedFileId(lastFileId);
+          // Update state - use functional updates to ensure state persistence in Edge
+          setUploadedFileId((prev) => {
+            console.log('Setting uploadedFileId state:', lastFileId, 'Previous:', prev);
+            return lastFileId;
+          });
+          setUploadedRowCount((prev) => {
+            console.log('Setting uploadedRowCount state:', lastRowCount, 'Previous:', prev);
+            return lastRowCount;
+          });
+          
+          // Force save to localStorage immediately (Edge compatibility)
+          try {
+            localStorage.setItem(`lastUploadedFile_${userId}`, lastFileId);
+            if (lastRowCount !== null) {
+              localStorage.setItem(`lastUploadedRowCount_${userId}`, lastRowCount.toString());
+            }
+            console.log('Saved to localStorage:', lastFileId);
+          } catch (e) {
+            console.error('Error saving to localStorage:', e);
+          }
         }
         setUploadStatus(`Successfully uploaded ${acceptedFiles.length} file(s)`);
-        // Invalidate queries to refresh file list
-        queryClient.invalidateQueries(['files', userId]);
-        queryClient.invalidateQueries(['catalogs', userId]);
+        // Invalidate and refetch queries to refresh file list
+        // Use setTimeout to ensure state is set before catalog refetch (Edge compatibility)
+        setTimeout(() => {
+          queryClient.invalidateQueries(['files', userId]);
+          // Force refetch catalog to include the newly uploaded file
+          queryClient.refetchQueries(['catalogs', userId], { active: true });
+        }, 100);
       } catch (error: any) {
         console.error('Upload error:', error);
         // Extract error message - check multiple possible locations
@@ -263,18 +344,39 @@ const FileUpload: React.FC<FileUploadProps> = ({ userId }) => {
       )}
 
       {/* Interactive Data Table - show immediately after upload */}
-      {uploadedFileId && (
-        <InteractiveDataTable 
-          tableName={uploadedFileId} 
-          rowCount={uploadedRowCount || undefined}
-          onTableNotFound={() => {
-            // Clear state and localStorage when table is not found (file was deleted)
-            setUploadedFileId(null);
-            setUploadedRowCount(null);
-            localStorage.removeItem(`lastUploadedFile_${userId}`);
-            localStorage.removeItem(`lastUploadedRowCount_${userId}`);
-          }}
-        />
+      {uploadedFileId ? (
+        <div className="mt-6">
+          <InteractiveDataTable 
+            tableName={uploadedFileId} 
+            rowCount={uploadedRowCount || undefined}
+            onTableNotFound={() => {
+              console.log('Table not found, clearing state');
+              // Clear state and localStorage when table is not found (file was deleted)
+              setUploadedFileId(null);
+              setUploadedRowCount(null);
+              setJustUploadedFileId(null);
+              try {
+                localStorage.removeItem(`lastUploadedFile_${userId}`);
+                localStorage.removeItem(`lastUploadedRowCount_${userId}`);
+              } catch (e) {
+                console.error('Error removing from localStorage:', e);
+              }
+            }}
+          />
+        </div>
+      ) : (
+        <div className="mt-6 text-sm text-gray-500 text-center py-4">
+          {/* Debug info - only show in development */}
+          {process.env.NODE_ENV === 'development' && (
+            <div className="text-xs text-gray-400 space-y-1">
+              <p>No file uploaded yet. Upload a file to see the data table.</p>
+              <p className="text-xs text-gray-300 mt-2">
+                Debug: uploadedFileId = {uploadedFileId || 'null'}, 
+                justUploaded = {justUploadedFileId || 'null'}
+              </p>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

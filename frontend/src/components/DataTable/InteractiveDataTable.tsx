@@ -26,6 +26,12 @@ const InteractiveDataTable: React.FC<InteractiveDataTableProps> = ({ tableName, 
     () => getTableColumns(tableName),
     {
       enabled: shouldShowTable && !!tableName,
+      // Retry on failure
+      retry: 2,
+      // Don't refetch on window focus
+      refetchOnWindowFocus: false,
+      // Cache columns for 5 minutes (they don't change often)
+      staleTime: 5 * 60 * 1000,
     }
   );
 
@@ -42,6 +48,12 @@ const InteractiveDataTable: React.FC<InteractiveDataTableProps> = ({ tableName, 
       }),
     {
       enabled: shouldShowTable && !!tableName,
+      // Retry on failure (might be transient network errors)
+      retry: 2,
+      // Don't refetch on window focus (prevents unnecessary requests)
+      refetchOnWindowFocus: false,
+      // Keep data fresh for 30 seconds (prevents unnecessary refetches)
+      staleTime: 30 * 1000,
     }
   );
 
@@ -63,12 +75,23 @@ const InteractiveDataTable: React.FC<InteractiveDataTableProps> = ({ tableName, 
 
   // Handle errors, especially "table not found" errors
   // NOTE: This useEffect must be called BEFORE any early returns (React Hooks rule)
+  // IMPORTANT: Only clear state on actual "table not found" errors, not transient network errors
   useEffect(() => {
     if (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      // If table not found, it might have been deleted - clear localStorage and notify parent
-      if (errorMessage.includes('not found') || errorMessage.includes('Table')) {
-        // Extract userId from localStorage keys (this is a bit of a hack, but works)
+      console.log('InteractiveDataTable error:', errorMessage);
+      
+      // Only clear state for actual "table not found" errors, not network errors or other issues
+      // Check for specific error patterns that indicate the table truly doesn't exist
+      const isTableNotFoundError = 
+        errorMessage.includes("Table") && errorMessage.includes("not found") ||
+        errorMessage.includes("404") && errorMessage.includes("table") ||
+        errorMessage.includes("does not exist") ||
+        (errorMessage.includes("not found") && !errorMessage.includes("network") && !errorMessage.includes("timeout") && !errorMessage.includes("ECONNREFUSED"));
+      
+      if (isTableNotFoundError) {
+        console.log('Table not found error detected, clearing state');
+        // Extract userId from localStorage keys
         const keys = Object.keys(localStorage);
         const fileStorageKeys = keys.filter(key => key.startsWith('lastUploadedFile_'));
         fileStorageKeys.forEach(key => {
@@ -85,6 +108,9 @@ const InteractiveDataTable: React.FC<InteractiveDataTableProps> = ({ tableName, 
             }
           }
         });
+      } else {
+        // For other errors (network, timeout, etc.), just log them but don't clear state
+        console.warn('Table loading error (not clearing state):', errorMessage);
       }
     }
   }, [error, tableName, onTableNotFound]);
@@ -97,53 +123,54 @@ const InteractiveDataTable: React.FC<InteractiveDataTableProps> = ({ tableName, 
     return null;
   }
 
-  if (error) {
+  // Only show error UI for persistent errors, not during loading or retries
+  // Show error only if we're not loading and have a real error (not just retrying)
+  if (error && !isLoading) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const isTableNotFound = errorMessage.includes('not found') || errorMessage.includes('Table');
+    const isTableNotFound = 
+      (errorMessage.includes('not found') || errorMessage.includes('Table')) &&
+      !errorMessage.includes('network') && 
+      !errorMessage.includes('timeout') &&
+      !errorMessage.includes('ECONNREFUSED');
     
-    return (
-      <div className="mt-6 card p-6 border-2 border-red-200 bg-red-50 animate-fade-in">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center space-x-2 text-red-800">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-              />
-            </svg>
-            <span className="font-semibold">Error loading data table</span>
+    // Only show error for actual table not found, not network errors
+    // Network errors should retry automatically
+    if (isTableNotFound) {
+      return (
+        <div className="mt-6 card p-6 border-2 border-red-200 bg-red-50 animate-fade-in">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center space-x-2 text-red-800">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+              <span className="font-semibold">Error loading data table</span>
+            </div>
+          </div>
+          <div className="text-sm text-red-700">
+            <p>The data table for this file no longer exists. This usually happens when:</p>
+            <ul className="list-disc list-inside mt-2 space-y-1">
+              <li>The file was deleted</li>
+              <li>The table was removed from the database</li>
+            </ul>
+            <p className="mt-3 text-xs text-red-600 italic">
+              The table reference has been cleared. Please upload a new file to view data.
+            </p>
+            <p className="mt-2 font-mono text-xs bg-red-100 p-2 rounded">
+              {errorMessage}
+            </p>
           </div>
         </div>
-        <div className="text-sm text-red-700">
-          {isTableNotFound ? (
-            <>
-              <p>The data table for this file no longer exists. This usually happens when:</p>
-              <ul className="list-disc list-inside mt-2 space-y-1">
-                <li>The file was deleted</li>
-                <li>The table was removed from the database</li>
-              </ul>
-              <p className="mt-3 text-xs text-red-600 italic">
-                The table reference has been cleared. Please upload a new file to view data.
-              </p>
-            </>
-          ) : (
-            <>
-              <p>Unable to load the data table. This might be because:</p>
-              <ul className="list-disc list-inside mt-2 space-y-1">
-                <li>The backend server is not running</li>
-                <li>The table name is incorrect</li>
-                <li>There was a network error</li>
-              </ul>
-            </>
-          )}
-          <p className="mt-2 font-mono text-xs bg-red-100 p-2 rounded">
-            {errorMessage}
-          </p>
-        </div>
-      </div>
-    );
+      );
+    } else {
+      // For network errors, show a warning but keep the table structure
+      // The query will retry automatically
+      console.warn('Network error loading table (will retry):', errorMessage);
+    }
   }
 
   return (
@@ -213,28 +240,15 @@ const InteractiveDataTable: React.FC<InteractiveDataTableProps> = ({ tableName, 
 
       {/* Table */}
       <div className="overflow-x-auto rounded-xl border-2 border-gray-200 min-h-[300px]">
-        {isLoading && (!data || rows.length === 0) ? (
+        {columns.length === 0 && !columnsData ? (
+          // Initial load - no columns yet
           <div className="p-8 text-center">
             <div className="inline-block animate-spin rounded-full h-8 w-8 border-2 border-primary-200 border-t-primary-600"></div>
             <p className="mt-2 text-sm text-gray-600 font-medium">Loading data table...</p>
             <p className="mt-1 text-xs text-gray-500">Fetching data from server</p>
           </div>
-        ) : !isLoading && rows.length === 0 && columns.length === 0 ? (
-          <div className="p-8 text-center text-gray-500">
-            <svg className="w-12 h-12 mx-auto text-gray-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
-            </svg>
-            <p className="font-medium text-gray-700">No data available</p>
-            <p className="mt-1 text-sm text-gray-500">The table is empty or could not be loaded</p>
-          </div>
-        ) : rows.length === 0 && !isLoading && columns.length > 0 ? (
-          <div className="p-8 text-center text-gray-500">
-            <p className="font-medium">No data found</p>
-            {debouncedSearch && (
-              <p className="mt-2 text-sm">Try adjusting your search terms</p>
-            )}
-          </div>
-        ) : (
+        ) : columns.length > 0 ? (
+          // Have columns - always show table structure (even during loading)
           <table className="w-full divide-y divide-gray-200">
             <thead className="bg-gradient-to-r from-primary-50 to-accent-50">
               <tr>
@@ -267,19 +281,46 @@ const InteractiveDataTable: React.FC<InteractiveDataTableProps> = ({ tableName, 
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
-              {rows.map((row, idx) => (
-                <tr key={idx} className="hover:bg-gray-50 transition-colors">
-                  {columns.map((column) => (
-                    <td key={column} className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
-                      {row[column] !== null && row[column] !== undefined
-                        ? String(row[column])
-                        : '-'}
-                    </td>
-                  ))}
+              {isLoading && rows.length === 0 ? (
+                <tr>
+                  <td colSpan={columns.length} className="px-4 py-8 text-center text-gray-500">
+                    <div className="inline-block animate-spin rounded-full h-6 w-6 border-2 border-primary-200 border-t-primary-600"></div>
+                    <p className="mt-2 text-sm">Loading data...</p>
+                  </td>
                 </tr>
-              ))}
+              ) : rows.length === 0 ? (
+                <tr>
+                  <td colSpan={columns.length} className="px-4 py-8 text-center text-gray-500">
+                    <p className="font-medium">No data found</p>
+                    {debouncedSearch && (
+                      <p className="mt-2 text-sm">Try adjusting your search terms</p>
+                    )}
+                  </td>
+                </tr>
+              ) : (
+                rows.map((row, idx) => (
+                  <tr key={idx} className="hover:bg-gray-50 transition-colors">
+                    {columns.map((column) => (
+                      <td key={column} className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+                        {row[column] !== null && row[column] !== undefined
+                          ? String(row[column])
+                          : '-'}
+                      </td>
+                    ))}
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
+        ) : (
+          // No columns and not loading - error state
+          <div className="p-8 text-center text-gray-500">
+            <svg className="w-12 h-12 mx-auto text-gray-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
+            </svg>
+            <p className="font-medium text-gray-700">No data available</p>
+            <p className="mt-1 text-sm text-gray-500">The table is empty or could not be loaded</p>
+          </div>
         )}
       </div>
 
