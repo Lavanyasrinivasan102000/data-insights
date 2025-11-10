@@ -1,4 +1,4 @@
-# RAG Application - Data Ingestion & Query System
+ Data Ingestion & Query System
 
 A full-stack application that allows users to upload CSV/JSON files, automatically catalog them using Google Gemini API, and query the data through a natural language chat interface with SQL execution and visualization.
 
